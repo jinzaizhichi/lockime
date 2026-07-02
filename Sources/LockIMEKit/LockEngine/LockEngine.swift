@@ -131,25 +131,21 @@ public final class LockEngine {
     /// since whichever fires is the one that emits the activation event.
     public func apply(_ config: LockConfiguration, reason: ActivationReason = .configChanged) {
         self.config = config
-        // Continuous locking is *subordinate* to the master: it engages only when
-        // both "Enable LockIME" (`isEnabled`) and the lock sub-toggle
-        // (`lockingEnabled`) are on. One-shot switching is gated by the master
-        // alone (in `fireSwitchOnceIfNeeded`), so a master-on / locking-off config
-        // still fires switch rules while pinning nothing — the "act like Input
-        // Source Pro" mode. `reevaluate` always runs so the switch arm can fire
-        // whenever the master is on, regardless of the lock sub-toggle.
-        let lockEngaged = config.isEnabled && config.lockingEnabled
-        // Order matters so disengaging the lock is side-effect free. When
-        // engaging (or re-applying while engaged), set the target first, then
+        // The single "Enable LockIME" switch gates everything — continuous
+        // locking and one-shot switching alike. Whether anything is actually
+        // *pinned* is the rules' business: a global default of "None" with only
+        // switch rules pins nothing (the pure per-context switcher setup).
+        // Order matters so turning the app off is side-effect free. When
+        // enabling (or re-applying while enabled), set the target first, then
         // enforce. Otherwise stop enforcing *first* — else reevaluate could force
         // one last switch under the still-engaged lock before it turns off (e.g.
         // the source has drifted off target and the revert is pending).
-        if lockEngaged {
+        if config.isEnabled {
             reevaluate(reason: reason)                       // set lock target + fire switch
             controller.setEnabled(true, reason: reason)      // then enforce on engage
         } else {
             controller.setEnabled(false, reason: reason)     // stop enforcing first
-            reevaluate(reason: reason)                       // fire switch (if master on); cache lock target only
+            reevaluate(reason: reason)                       // cache lock target only
         }
         updateURLPolling()
         updateAddressBarMonitoring()
@@ -342,7 +338,9 @@ public final class LockEngine {
     private func updateURLPolling() {
         urlPollTask?.cancel()
         urlPollTask = nil
-        guard config.enhancedModeEnabled, urlProvider != nil, !config.urlRules.isEmpty,
+        // The master switch gates observation too: while LockIME is off it
+        // must stop reading browser URLs, not just refrain from acting on them.
+        guard config.isEnabled, config.enhancedModeEnabled, urlProvider != nil, !config.urlRules.isEmpty,
               BrowserBundleIDs.isBrowser(effectiveBundleID)
         else { return }
         urlPollTask = Task { @MainActor [weak self] in
@@ -363,7 +361,10 @@ public final class LockEngine {
     /// attaches to exactly the browser the user is in, and detaches otherwise. A
     /// launcher overlay over a browser suspends it (the overlay isn't a browser).
     private func updateAddressBarMonitoring() {
-        let shouldObserve = config.addressBarFocusEnabled
+        // Gated on the master switch for the same reason as updateURLPolling():
+        // disabled means no AX observation at all, not just no action.
+        let shouldObserve = config.isEnabled
+            && config.addressBarFocusEnabled
             && config.addressBarSourceID != nil
             && BrowserBundleIDs.isBrowser(effectiveBundleID)
         addressBarMonitor.observe(bundleID: shouldObserve ? effectiveBundleID : nil)
